@@ -1,0 +1,4 @@
+Benchmark data sets used to assess proovframe - frame-shift correction for long-read (meta)genomics
+
+- [[emales/README.org]]: 8 viral genomes with simulated nanopore errors
+- [[mbovis/README.org]]: Mycoplasma bovis nanopore reads corrected with Uniref90 protein sets of different divergence

@@ -1,0 +1,31 @@
+#+begin_src sh
+# emales.fna - emale genomes
+# emales.faa - emale proteomes
+# emales-reads-sim.fa - simulated with nanosim (low error rate)
+./nanosim.sh emales.fna emales-reads-sim.fa -c ../mbovis/mbovis-nanosim-profile/mbovis
+
+# estimate error rates in reads
+proovframe prf emales.fna emales-reads-sim.fa
+# map proteins to reads
+proovframe map -a emales.faa -o emales-reads-sim.tsv emales-reads-raw.fa
+# fix frameshifts in reads
+proovframe fix -o emales-reads-fix.fa emales-reads-sim.fa emales-reads-sim.tsv
+
+# annotate genes in ref and reads, extract proteins
+# prodigal -n -t emales-prdgl.train -i emales.fna
+prodigal -t emales-prdgl.train -i emales.fna -o emales.gff0 -f gff 
+# github.com/thackl/seq-scripts/
+gff-clean emales.gff0 > emales.gff && rm emales.gff0
+gff2cds --aa --fna emales.fna --type CDS --source Prodigal_v2.6.3 emales.gff > emales.faa
+
+# sim fix 
+for suf in sim fix; do
+    prodigal -t emales-prdgl.train -i emales-reads-$suf.fa -o emales-reads-$suf.gff0 -f gff 
+    gff-clean emales-reads-$suf.gff0 > emales-reads-$suf.gff && rm emales-reads-$suf.gff0
+    gff2cds --aa --fna emales-reads-$suf.fa --type CDS --source Prodigal_v2.6.3 emales-reads-$suf.gff > emales-reads-$suf.faa
+done;
+
+# map proteins back to identify false positives
+diamond blastp --more-sensitive -k1 -q emales-reads-sim.faa -d emales.dmnd > emales-reads-sim-faa.tsv
+diamond blastp --more-sensitive -k1 -q emales-reads-fix.faa -d emales.dmnd > emales-reads-fix-faa.tsv
+#+end_src
