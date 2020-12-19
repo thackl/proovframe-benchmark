@@ -1,0 +1,207 @@
+Download data, prep reads and proteins
+
+#+begin_src sh
+# get mbovis reference NC_014760.1
+# https://www.ncbi.nlm.nih.gov/assembly/GCF_000183385.1
+prodigal -g 4 -n -t mbovis-prdgl.train -i mbovis.fna
+prodigal -g 4 -t mbovis-prdgl.train -i mbovis.fna -o mbovis.gff0 -f gff 
+gff-clean mbovis.gff0 > mbovis.gff && rm mbovis.gff0
+gff2cds --codontable 4 --aa --fna mbovis.fna --type CDS --source Prodigal_v2.6.3 mbovis.gff > mbovis.faa
+
+# get perfect reads (forward and fully aligned only)
+# 90% mapped, primary
+minimap2 -N1 -c mbovis.fna mbovis-reads-raw.fa |
+ perl -ane 'print if $F[10]/$F[1] > .9 && /tp:A:P/ && $F[4] eq "+"' > mbovis-reads-raw.paf 
+tsv-select -f 6,8,9,1 mbovis-reads-raw.paf > mbovis-reads-ref.bed                 
+seqkit subseq --bed mbovis-reads-ref.bed mbovis.fna | perl -pe 's/>\S+\s/>/' > mbovis-reads-ref.fa
+
+# get hits from uniref90
+~/software/diamond-2.0.4/diamond blastp -p 60 -c 1 \
+  --db ~crov/databases/uniref90/uniref90 \
+  --very-sensitive --top 50 \
+  --query mbovis.faa \
+  --outfmt 6 --out mbovis-uniref90.tsv
+# see R for computing different sets
+
+#+end_src
+
+Get proteins sets of different divergence - maximum identity: 100%, 80% and 60%
+
+#+begin_src R
+library(tidyverse)
+library(gggenomes)
+# get different uniref sets to assess influence database similarity
+sp <- read_blast("mbovis-uniref90.tsv")
+
+sp100 <- sp %>% group_by(qaccver) %>%
+  slice_max(pident, with_ties = F) %>%
+  write_tsv("mbovis-uniref90-id100.tsv")
+sp80 <- sp %>% filter(pident <= 80) %>% group_by(qaccver) %>%
+  slice_max(pident, with_ties = F) %>%
+  write_tsv("mbovis-uniref90-id80.tsv")
+sp60 <- sp %>% filter(pident <= 60) %>% group_by(qaccver) %>%
+  slice_max(pident, with_ties = F) %>%
+  write_tsv("mbovis-uniref90-id60.tsv")
+
+# mean identities per set
+map(list(sp100, sp80, sp60), ~mean(.x$pident))
+#+end_src
+
+Correct reads with different protein sets
+
+#+begin_src sh
+# correct reads
+for id in 60 80 100; do
+    proovframe map -o mbovis-dmnd-id$id.tsv -a mbovis-uniref90-id$id.faa mbovis-reads-raw.fa -- --query-gencode 4
+    proovframe fix -g 4 -o mbovis-reads-id$id.fa mbovis-reads-raw.fa mbovis-dmnd-id$id.tsv
+done;
+
+# annotate and map back to reference protein set (false positives have no hit)
+for suf in raw id60 id80 id100; do
+    prodigal -g 4 -t mbovis-prdgl.train -i mbovis-reads-$suf.fa -o mbovis-reads-$suf.gff0 -f gff 
+    gff-clean mbovis-reads-$suf.gff0 > mbovis-reads-$suf.gff && rm mbovis-reads-$suf.gff0
+    gff2cds --codontable 4 --aa --fna mbovis-reads-$suf.fa --type CDS --source Prodigal_v2.6.3 mbovis-reads-$suf.gff > mbovis-reads-$suf.faa
+    diamond blastp --more-sensitive -k1 -q mbovis-reads-$suf.faa -d mbovis.dmnd > mbovis-reads-$suf-faa.tsv
+done;
+#+end_src
+
+Plot results
+
+#+begin_src R
+library(tidyverse)
+library(patchwork)
+library(gggenomes) # https://github.com/thackl/gggenomes
+
+
+# analyze frame-correction
+s0 <- read_fai("mbovis-reads-raw.fa")
+g0 <- read_gff("mbovis.gff") %>% mutate(set="reference")
+p0 <- read_fai("mbovis.faa")
+
+# expand ref genes to reads
+gpaf <- read_paf("mbovis-reads-raw.paf")
+s1 <- filter(s0, seq_id %in% gpaf$seq_id1)
+
+read_gene_calls <- function(pre, set){
+  x <- read_gff(str_glue("{pre}.gff")) %>%
+    filter(seq_id %in% gpaf$seq_id1) # only analyze fully aligned reads
+  y <- read_blast(str_glue("{pre}-faa.tsv"))
+  x %>% left_join(y, by=c(ID="qaccver")) %>%
+    mutate(
+      is_fp = is.na(saccver),
+      call_status = ifelse(is.na(bitscore), "false positive", "true positive"),
+      set=str_replace(pre, "^.*-", ""))
+}
+
+feats <- map(c(
+  ref="mbovis-reads-ref",
+  raw="mbovis-reads-raw",
+  id60="mbovis-reads-id60",
+  id80="mbovis-reads-id80",
+  id100="mbovis-reads-id100"), read_gene_calls) 
+
+
+map(feats, count, is_fp, call_status)
+
+# ==>>> TODO need to compare to proteins called on actual ref reads instead to
+# ref proteins!!
+
+gg_genes <- gggenomes(s1[1:3,], features = feats) +
+  geom_seq() +
+  geom_gene(aes(fill=set), data=use_features(ref), arrow=1.5, color="white",
+    position=position_nudge(y=.05)) +
+  geom_gene(aes(fill=set, alpha=call_status), data=use_features(raw),
+    position=position_nudge(y=.15), arrow=1.5, color="white") +
+  geom_gene(aes(fill=set, alpha=call_status), data=use_features(id100),
+    position=position_nudge(y=.25), arrow=1.5, color="white") +
+  geom_gene(aes(fill=set, alpha=call_status), data=use_features(id80),
+    position=position_nudge(y=.35), arrow=1.5, color="white") +
+  geom_gene(aes(fill=set, alpha=call_status), data=use_features(id60),
+    position=position_nudge(y=.45), arrow=1.5, color="white") +
+  scale_fill_manual(values=c(id100="#1b9e77", raw="#d95f02", ref="#7570b3",
+    id80="#66a61e", id60="#9fa61e")) +
+  guides(alpha=FALSE) +
+  scale_alpha_manual("Gene call status", values = c("true positive"=1, "false positive"=.5)) + theme_gggenomes_clean(base_size=12)
+gg_genes
+
+
+ggsave("mbovis-genes-v2.pdf")
+
+## mapping stat compact -----------------------------------------------
+add_stats <- function(x){
+  x %>%
+    left_join(select(p0, saccver=seq_id, slen=length)) %>%
+    mutate( # add info to false positive hits
+      saccver = ifelse(is_fp,paste0("fp",row_number()),saccver),
+      slen = ifelse(is_fp,width,slen) 
+    ) %>%
+    group_by(seq_id, saccver) %>% arrange(desc(width)) %>%
+    summarize_all(first) %>% ungroup %>%
+    mutate(
+      slen_bin = case_when(
+        slen<150~"<150", slen>300~">300", TRUE~"150-300"),
+      scov = length/slen,
+
+      scov_bin = case_when(
+        scov<.25~"<25%", scov<.75~"25-75%", scov>=.75~">75%", TRUE~"FP"))
+}
+
+
+k0 <- bind_rows(.id = "set",
+  "raw" = add_stats(feats[["raw"]]),
+  "id100" = add_stats(feats[["id100"]]),
+  "id80" = add_stats(feats[["id80"]]),
+  "id60" = add_stats(feats[["id60"]]))
+
+# ref counts
+r0 <- feats$ref %>%
+  left_join(select(p0, saccver=seq_id, slen=length)) %>%
+  mutate(slen_bin = case_when(
+    slen<150~"<150", slen>300~">300", TRUE~"150-300")) %>%
+  count(slen_bin, name="ref_n")
+
+
+k1 <- count(k0, set, scov_bin, slen_bin) %>%
+  left_join(r0) %>%
+  mutate(
+    n=ifelse(scov_bin == "FP", -n, n),
+    f=n/ref_n,
+    scov_bin = factor(scov_bin, levels = c(">75%","25-75%","<25%","FP")),
+    slen_bin = factor(slen_bin, levels = c("<150","150-300",">300")),
+    set = factor(set, levels=c("raw", "id100", "id80", "id60"))
+  )
+
+k2 <- k1 %>% group_by(set, scov_bin) %>%
+  summarize(n=sum(n), ref_n=sum(ref_n)) %>%
+  group_by(set) %>%
+  mutate(f=n/ref_n, y=(1-as.numeric(scov_bin)/4) * sum(n)/ref_n - .08)
+
+gg_stats3 <- ggplot(k1) +
+  geom_hline(yintercept=c(0,1), size=.2, color="grey50") +
+  geom_col(aes(x=slen_bin, y=f, fill=set, alpha=scov_bin)) +
+  geom_label(aes(x=5.5, y=y, label=sprintf("%.1f%%", round(abs(f*100), 1)),
+    alpha=scov_bin), fill="white", color="white", data=k2, size=3,
+    label.size=1, fontface="bold", label.padding=unit(0.15, "lines"),
+    hjust=1, show.legend = FALSE) +
+  geom_label(aes(x=5.5, y=y, label=sprintf("%.1f%%", round(abs(f*100), 1)),
+    alpha=scov_bin, fill=set), data=k2, size=3, label.size=0,
+    fontface="bold", label.padding=unit(0.15, "lines"), hjust=1,
+    show.legend = FALSE) +
+  scale_fill_manual(values=c(id100="#1b9e77", raw="#d95f02", ref="#7570b3",
+    id80="#66a61e", id60="#9fa61e")) +
+#  scale_fill_brewer(palette="Dark2", direction = -1) +
+  theme_bw() + no_grid() + 
+  scale_x_discrete("Protein length (aa)", guide=guide_axis(angle=45),
+    expand=expansion(add=c(1,3))) +
+  scale_y_continuous("Recall", limits = c(-.2,1.02), breaks = c(0,1), labels=c("0%", "100%")) +
+  facet_wrap(~set, nrow=1) +
+  scale_color_manual(values = c("black", "grey50")) +
+   guides(fill=FALSE) +
+  scale_alpha_manual("Recall length", values=c("FP"=.15,"<25%"=.3,"25-75%"=.55,">75%"=1,"missing"=0)) 
+
+gg_genes + gg_stats3 + plot_layout(widths=c(3,2), guides="collect") +
+  plot_annotation(tag_levels = "a")
+
+ggsave("mbovis-v2.pdf", width=12, height=3.5)
+ggsave("mbovis-v2.png", width=12, height=3.5)
+#+end_src
