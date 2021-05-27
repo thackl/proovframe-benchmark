@@ -1,20 +1,25 @@
 Download data, prep reads and proteins
 
 #+begin_src sh
-# get mbovis reference NC_014760.1
-# https://www.ncbi.nlm.nih.gov/assembly/GCF_000183385.1
+# mbovis reference NC_014760.1
 # Prodigal v2.6.3
 prodigal -g 4 -n -t mbovis-prdgl.train -i mbovis.fna
 prodigal -g 4 -t mbovis-prdgl.train -i mbovis.fna -o mbovis.gff0 -f gff 
 gff-clean mbovis.gff0 > mbovis.gff && rm mbovis.gff0
+# reference protein set
 gff2cds --codontable 4 --aa --fna mbovis.fna --type CDS --source Prodigal_v2.6.3 mbovis.gff > mbovis.faa
 
-# get perfect reads (forward and fully aligned only)
-# 90% mapped, primary
+# ENA Study Accession: PRJEB38523
+# ENA Run Accession: ERR4179766
+# only reads >15bp
+seqkit seq -m 15000 M_bovis_MinION_Bonito_Subsampled/PG45.fastq |
+  seqkit fq2fa > mbovis-reads-raw.fa
+
+# For visualization we need the location of a reads on the reference genome. Use
+# only reads fully aligned (90% mapped, primary), and forward - makes it easier
+# to extract the right genes from the reference genome
 minimap2 -N1 -c mbovis.fna mbovis-reads-raw.fa |
  perl -ane 'print if $F[10]/$F[1] > .9 && /tp:A:P/ && $F[4] eq "+"' > mbovis-reads-raw.paf 
-tsv-select -f 6,8,9,1 mbovis-reads-raw.paf > mbovis-reads-ref.bed                 
-seqkit subseq --bed mbovis-reads-ref.bed mbovis.fna | perl -pe 's/>\S+\s/>/' > mbovis-reads-ref.fa
 
 # get hits from uniref90
 # diamond v2.0.4
@@ -103,11 +108,6 @@ feats <- map(c(
   id80="mbovis-reads-id80",
   id100="mbovis-reads-id100"), read_gene_calls) 
 
-
-map(feats, count, is_fp, call_status)
-
-# ==>>> TODO need to compare to proteins called on actual ref reads instead to
-# ref proteins!!
 
 gg_genes <- gggenomes(s1[1:3,], features = feats) +
   geom_seq() +
