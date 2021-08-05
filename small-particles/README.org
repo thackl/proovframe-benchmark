@@ -1,0 +1,104 @@
+#+begin_src sh
+# thousand random reads >1k in length
+seqkit -j 60 sample -n 1500 ../np-data/ves-1k.fna | seqkit head -n 1000 > ves-r1000.fna
+
+proovframe map -t 30 -d ../il-assembly/co-plass.dmnd -o ves-r1000_co-plass.tsv ves-r1000.fna -- -c1
+proovframe fix -o ves-r1000-pf.fna ves-r1000.fna ves-r1000_co-plass.tsv
+
+virsorter run -w ves-r1000-vs -i ves-r1000.fna -j 60
+virsorter run -w ves-r1000-pf-vs -i ves-r1000-pf.fna -j 60
+
+for pre in ves-r1000-raw-virsorter ves-r1000-fix-virsorter; do
+    prodigal -f gff -o $pre-raw.gff -i $pre.fa;
+    gff-clean $pre-raw.gff > $pre.gff && rm $pre-raw.gff
+done;
+
+#+end_src
+
+#+begin_src R
+library(tidyverse)
+library(gggenomes)
+
+# system("cp /bmm/crov/CroV-complex/vesicle-nanopore/np-error-anno/ves-vs-stats.tsv .")
+
+m0 <- read_tsv("ves-vs-stats.tsv")
+
+m1 <- m0 %>%
+  mutate(
+    step = case_when(
+      str_detect(file, ".fna$") ~ "ref",
+      str_detect(file, "-pf[-/]") ~ "fix",
+      TRUE ~ "raw"),
+    set = str_extract(file, "[hr]1000"),
+    sample = paste0(set, "-", step)
+  )
+
+m2 <- m1 %>% filter(step != "ref") %>%
+  left_join(
+    m1 %>% filter(step == "ref") %>%
+    select(set, ref_num_seqs =num_seqs, ref_sum_len=sum_len)) %>%
+  mutate(
+    frac_seqs = num_seqs/ref_num_seqs,
+    frac_len = sum_len/ref_sum_len) %>%
+  select(sample, set, step, num_seqs, frac_seqs, sum_len, frac_len)
+
+m2
+
+gr0 <- read_gff("ves-r1000.gff")
+gf0 <- read_gff("ves-r1000-pf.gff")
+# gw0 <- read_gff("ves_h1000-pf-wovl.gff")
+
+s0 <- read_fai("ves-r1000.fna")
+
+# do we have overlapping alignments?
+h0 <- read_blast("ves-r1000_co-plass.tsv") %>%
+  rename(seq_id=qaccver, start=qstart, end=qend)
+
+h0 %>% filter(seq_id == lag(seq_id) & pmin(start, end) < pmax(lag(start), lag(end)))
+
+s1 <- s0 %>% filter(seq_id == "01322c06-6c71-4a5b-8b8f-85c668ed9d7a") %>% slice(9:10)
+gggenomes(s1, features = list(raw=gr0, fix=gf0, hit=h0)) +
+  geom_seq() +
+  geom_gene(data=use_features(raw), fill="#d95f02", arrow=2, position=position_pile()) +
+  geom_gene(data=use_features(fix), position=position_pile(base=.5), fill="#1b9e77", arrow=2) +
+  geom_feature(data=use_features(hit), position=position_pile(base=.2), size=1)
+
+w0 <- bind_rows(.id="set", raw=gr0, fix=gf0) %>%
+  #filter(seq_id %in% s1$seq_id) %>% 
+  replace_na(list(completeness=0))
+w0 %>% group_by(set) %>% summarize(w=sum(width)) %>% summarize(first(w)/last(w))
+
+ggsave("ves-frameshift.png")
+
+
+q0 <- bind_rows(.id="set",
+  raw=read_tsv("ves_h1000-cv-qual.tsv"),
+  fix=read_tsv("ves_h1000-pf-cv-qual.tsv")
+) %>% replace_na(list(completeness=0))
+
+ggplot(q0) + geom_histogram(aes(x=completeness, fill=set), position="dodge")
+
+q0 %>% group_by(set) %>% summarize(mean(completeness))
+
+
+ggplot(w0) + geom_histogram(aes(x=width, weight=width, fill=set), position="dodge", bins=30)
+
+vs0 <- bind_rows(.id="set",
+  raw=read_gff("ves-r1000-raw-virsorter.gff"),
+  fix=read_gff("ves-r1000-fix-virsorter.gff")
+  )
+
+vs0 %>% group_by(set) %>%
+  summarize(
+    n_distinct(seq_id),
+    n(),
+    median(width),
+    sum(width))
+
+349272/1705578
+filter(s0, seq_id %in% filter(vs0, set=="raw")$seq_id)
+sum(s0$length)
+
+vs0 %>% group_by(set, seq_id) %>% summarize(coding_density=sum(width)/max(end)) %>%
+  group_by(set) %>% summarize(mean(coding_density))
+#+end_src
