@@ -1,0 +1,8 @@
+
+#+begin_src sh
+# proovframe-v0.9.6
+date &> amuc-uniref90-fast-map.log
+proovframe map -t 60 -d uniref90.dmnd -o amuc-uniref90-fast.o6 \
+  -m fast amuc-all.fna -- -t /data/thackl/tmp-big/ -c1 &>> amuc-uniref90-fast-map.log &!
+proovframe fix -o amuc-all-fix-uniref90-fast.fna amuc-all.fna amuc-uniref90-fast-long-reads-k1.o6
+#+end_src
